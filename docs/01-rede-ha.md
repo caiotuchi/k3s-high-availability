@@ -50,22 +50,23 @@ sudo reboot
 ```
 
 ## Instalação do Cloudflare WARP Connector
-- Repositório oficial Cloudflare
-- Serviço warp-svc com warp-cli
 
+- 1. Configurar pubkey, apt repo e atualizar/instalar WARP
 ```bash
-curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/cloudflare-warp.gpg
-echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp.gpg] https://pkg.cloudflareclient.com/ bookworm main" | sudo tee /etc/apt/sources.list.d/cloudflare-warp.list
-sudo apt update
-sudo apt -y install cloudflare-warp
+curl https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
 
-sudo systemctl enable warp-svc
-sudo systemctl start warp-svc
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
 
-warp-cli register
-warp-cli set-mode warp
+sudo apt-get update && sudo apt-get install cloudflare-warp
+```
+- 2. Ativar o encaminhamento IP no host
+```bash
+sudo sysctl -w net.ipv4.ip_forward=1
+```
+- 3. Executar o WARP Connector com token
+```bash
+warp-cli connector new <TOKEN_WARP>
 warp-cli connect
-warp-cli status
 ```
 
 ## Instalação do Keepalived (VRRP)
