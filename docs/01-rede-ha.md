@@ -6,14 +6,40 @@
 - Base Debian 12 (Bookworm) em 4 VMs (2 por site)
 
 ## Topologia
-- Cluster A: VM-A1 e VM-A2 (Keepalived + WARP), VIP: <VIP_CLUSTER_A>
-- Cluster B: VM-B1 e VM-B2 (Keepalived + WARP), VIP: <VIP_CLUSTER_B>
+- Cluster A: VM-A1 e VM-A2 (Keepalived + WARP), VIP: <VIP_CLUSTER_A_WARP>
+- Cluster B: VM-B1 e VM-B2 (Keepalived + WARP), VIP: <VIP_CLUSTER_B_WARP>
 - Tráfego inter-cluster encapsulado na rede global Cloudflare
 
 ## Pré-requisitos
 - Debian 12 atualizado
 - Acesso sudo
 - Interfaces de rede com IPs estáticos por VM
+
+### Configurar Hosts em /etc/hosts de todas as maquinas
+```bash
+# Hosts do Cluster A 
+<IP_CLUSTER_A_MASTER01> ca-master-01
+<IP_CLUSTER_A_MASTER02> ca-master-02
+<IP_CLUSTER_A_MASTER03> ca-master-03
+<IP_CLUSTER_A_WORKER01> ca-worker-01
+<IP_CLUSTER_A_WORKER02> ca-worker-02
+<IP_CLUSTER_A_WORKER03> ca-worker-03
+<IP_CLUSTER_A_WARP_CONNECTOR_A1> ca-warp-connector-01
+<IP_CLUSTER_A_WARP_CONNECTOR_A2> ca-warp-connector-02
+<VIP_CLUSTER_A_KUBEAPI> ca-kube-apiserver-vip
+<VIP_CLUSTER_A_WARP> ca-warp-connector-vip
+# Hosts do Cluster B
+<IP_CLUSTER_B_MASTER01> cb-master-01
+<IP_CLUSTER_B_MASTER02> cb-master-02
+<IP_CLUSTER_B_MASTER03> cb-master-03
+<IP_CLUSTER_B_WORKER01> cb-worker-01
+<IP_CLUSTER_B_WORKER02> cb-worker-02
+<IP_CLUSTER_B_WORKER03> cb-worker-03
+<IP_CLUSTER_B_WARP_CONNECTOR_A1> cb-warp-connector-01
+<IP_CLUSTER_B_WARP_CONNECTOR_A2> cb-warp-connector-02
+<VIP_CLUSTER_B_KUBEAPI> cb-kube-apiserver-vip
+<VIP_CLUSTER_B_WARP> cb-warp-connector-vip
+```
 
 ### Atualização inicial
 

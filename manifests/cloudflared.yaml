@@ -1,17 +1,3 @@
-# Exposição Segura da API REST via Cloudflare Tunnel (cloudflared)
-
-## Objetivo
-- Publicar a API REST do TCC de forma segura
-- Usar Cloudflare Tunnel com cloudflared como Deployment
-
-## Pré-requisitos
-- Conta Cloudflare e Tunnel criado
-- Token do Tunnel
-- Domínio configurado no Cloudflare
-
-## Deployment de Cloudflared
-
-```bash
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -53,4 +39,3 @@ spec:
           initialDelaySeconds: 15
           periodSeconds: 10
           failureThreshold: 3
-```

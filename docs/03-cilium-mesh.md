@@ -1,8 +1,7 @@
-# Cilium v1.15.5 com IPv6, Hubble e ClusterMesh em K3s
+# Cilium v1.15.5 com ClusterMesh em K3s
 
 ## Objetivo
 - Instalar Cilium via Helm com kube-proxy replacement (strict)
-- Habilitar IPv6 e Hubble
 - Conectar clusters via ClusterMesh com CA compartilhada
 
 ## Pré-requisitos
@@ -19,48 +18,63 @@ helm repo add cilium https://helm.cilium.io/
 helm repo update
 ```
 
-### Valores recomendados (ajuste conforme ambiente)
-
-```yaml
-# values-cilium.yaml
-cluster:
-  name: "cluster-a"
-  id: 1
-
-ipv4:
-  enabled: true
-ipv6:
-  enabled: true
-
-k8sServiceHost: "<VIP_CTRL_PLANE>"
-k8sServicePort: 6443
-
-kubeProxyReplacement: "strict"
-
-hubble:
-  relay:
-    enabled: true
-  ui:
-    enabled: true
-
-ipam:
-  operator:
-    clusterPoolIPv4PodCIDRList:
-      - "10.42.0.0/16"
-    clusterPoolIPv6PodCIDRList:
-      - "fd00:42::/56"
-
-nodePort:
-  enabled: true
-```
-
 ### Instalação
 
 ```bash
-helm install cilium cilium/cilium \
-  --version 1.15.5 \
+helm upgrade --install cilium cilium/cilium --version 1.15.5 \
   --namespace kube-system \
-  -f values-cilium.yaml
+  --set cluster.name=cluster-a \
+  --set cluster.id=1 \
+  --set ipam.mode=cluster-pool \
+  --set kubeProxyReplacement=strict \
+  --set bpf.hostReachableServices=true \
+  --set healthChecking=true \
+  --set healthPort=9879 \
+  --set endpointHealthChecking.enabled=true \
+  --set proxy.connectTimeout=5s \
+  --set proxy.responseTimeout=10s \
+  --set loadBalancer.algorithm=random \
+  --set hubble.enabled=true \
+  --set hubble.relay.enabled=true \
+  --set hubble.ui.enabled=true \
+  --set clustermesh.useApiserver=true \
+  --set clustermesh.cacheTTL=15s \
+  --set l2announcements.enabled=true \
+  --set externalIPs.enabled=true \
+  --set k8sClientRateLimit.qps=50 \
+  --set k8sClientRateLimit.burst=100 \
+  --set ipam.operator.clusterPoolIPv4PodCIDRList[0]=10.100.0.0/16 \
+  --set global.mtu=1230
+```
+
+### Verificação
+
+```bash
+kubectl apply -f - --context=k3s-cluster-ca <<EOF
+apiVersion: "cilium.io/v2alpha1"
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: default-pool
+spec:
+  blocks:
+  - start: "10.220.0.200"
+    stop: "10.220.0.250"
+---
+apiVersion: "cilium.io/v2alpha1"
+kind: CiliumL2AnnouncementPolicy
+metadata:
+  name: clustermesh-l2-policy
+spec:
+  interfaces:
+  - eth0
+  externalIPs: true
+  loadBalancerIPs: true
+  serviceSelector:
+    matchLabels:
+      k8s-app: clustermesh-apiserver
+EOF
+
+kubectl rollout restart deployment/cilium-operator -n kube-system
 ```
 
 ### Verificação
@@ -89,32 +103,64 @@ sudo tar xzvfC cilium-linux-${CLI_ARCH}.tar.gz /usr/local/bin
 rm cilium-linux-${CLI_ARCH}.tar.gz{,.sha256sum}
 ```
 
+## Iniciando o Multi-cluster
+
+### Criando contextos
+No master01 do cluster A:
+```bash
+cat /etc/rancher/k3s/k3s.yaml > /root/k3s-cluster-a.yaml
+sed -i 's/default/k3s-cluster-a/g' /root/k3s-cluster-a.yaml
+sed -i "s/127.0.0.1/ca-kube-apiserver-vip/" /root/k3s-cluster-a.yaml
+```
+No master01 do cluster B:
+```bash
+cat /etc/rancher/k3s/k3s.yaml > /root/k3s-cluster-b.yaml
+sed -i 's/default/k3s-cluster-b/g' /root/k3s-cluster-b.yaml
+sed -i "s/127.0.0.1/cb-kube-apiserver-vip/" /root/k3s-cluster-b.yaml
+```
+### Trocando arquivos entre os custers:
+No master01 do cluster A:
+```bash
+scp /root/k3s-cluster-a.yaml root@cb-master01:/root/k3s-cluster-a.yaml
+```
+No master01 do cluster B:
+```bash
+scp /root/k3s-cluster-b.yaml root@ca-master01:/root/k3s-cluster-b.yaml
+```
+### Unindo os arquivos de kubeapi dos custers:
+No master01 de ambos os clusters:
+```bash
+KUBECONFIG=/root/k3s-cluster-a.yaml:/root/k3s-cluster-b.yaml kubectl config view --merge --flatten > /root/kubeconfig-merged.yaml
+export KUBECONFIG=/root/kubeconfig-merged.yaml
+```
+Testando contextos em ambos os clusters:
+```bash
+kubectl config get-contexts
+kubectl get nodes --context=k3s-cluster-a
+kubectl get nodes --context=k3s-cluster-b
+```
+
 ### Compartilhar CA do Cilium
-- Copiar o secret `cilium-ca` do Cluster A para o Cluster B
-
 ```bash
-kubectl --context=$CLUSTER1 get secret -n kube-system cilium-ca -o yaml | \
-  kubectl --context $CLUSTER2 create -f -
+kubectl get secret -n kube-system cilium-ca -o yaml --context=k3s-cluster-a > cilium-ca.yaml
+kubectl delete secret cilium-ca -n kube-system --context=k3s-cluster-b
+kubectl apply -f cilium-ca.yaml --context=k3s-cluster-b
+kubectl rollout restart daemonset/cilium -n kube-system --context=k3s-cluster-b
+kubectl rollout restart deployment/cilium-operator -n kube-system --context=k3s-cluster-b
+```
+### Unindo os clusters com clustermesh do cilium
+```bash
+cilium clustermesh enable --context k3s-cluster-a --service-type=LoadBalancer
+cilium clustermesh enable --context k3s-cluster-b --service-type=LoadBalancer
 ```
 
-### Ativar componentes de ClusterMesh
-
 ```bash
-cilium clustermesh enable --context $CLUSTER1
-cilium clustermesh enable --context $CLUSTER2
-```
+# Conexão 01 -> 02
+cilium clustermesh connect --context k3s-cluster-a \
+  --destination-context k3s-cluster-b
 
-### Conectar clusters
-
-```bash
-cilium clustermesh connect --context $CLUSTER1 --destination-context $CLUSTER2
-```
-
-### Status
-
-```bash
-cilium clustermesh status --context $CLUSTER1
-cilium clustermesh status --context $CLUSTER2
+cilium clustermesh status --context k3s-cluster-a --wait
+cilium clustermesh status --context k3s-cluster-b --wait
 ```
 
 ## Observações de Endereçamento
