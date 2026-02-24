@@ -1,0 +1,151 @@
+# ==========================================================
+# CLUSTER 01 - MASTER (Primary)
+# ==========================================================
+
+# 1. ConfigMap Global (Necessário para as variáveis de ambiente)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: global-config
+  namespace: default
+data:
+  cluster-name: "Cluster-01"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: master-config
+  namespace: default
+data:
+  init-master.sh: |
+    #!/bin/bash
+    set -e
+    echo "👑 Inicializando Master..."
+    
+    # Configurações de replicação
+    cat >> /var/lib/postgresql/data/pgdata/postgresql.conf << EOF
+    wal_level = replica
+    max_wal_senders = 50
+    max_replication_slots = 50
+    hot_standby = on
+    listen_addresses = '*'
+    shared_buffers = 256MB
+    max_connections = 300
+    EOF
+    
+    cat >> /var/lib/postgresql/data/pgdata/pg_hba.conf << EOF
+    host    replication     replicator      0.0.0.0/0               trust
+    host    all             all             0.0.0.0/0               trust
+    EOF
+    
+    # Cria usuário de replicação e banco (se não existir)
+    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
+        DO \$\$
+        BEGIN
+            IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'replicator') THEN
+                CREATE USER replicator WITH REPLICATION ENCRYPTED PASSWORD 'replicator123';
+            END IF;
+        END
+        \$\$;
+        CREATE DATABASE app_db;
+        GRANT ALL PRIVILEGES ON DATABASE app_db TO postgres;
+    EOSQL
+    
+    # Cria tabela de teste
+    psql -v ON_ERROR_STOP=0 --username "$POSTGRES_USER" --dbname "app_db" <<-EOSQL
+        CREATE TABLE IF NOT EXISTS test_data (
+            id SERIAL PRIMARY KEY,
+            cluster VARCHAR(50),
+            node VARCHAR(50),
+            message TEXT,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+    EOSQL
+    echo "✅ Master Configurado!"
+
+---
+# Service GLOBAL (Escrita/Leitura Master)
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-global-master
+  namespace: default
+  annotations:
+    service.cilium.io/global: "true"
+spec:
+  ports:
+  - port: 5432
+    name: postgres
+  type: ClusterIP
+  selector:
+    app: postgres
+    role: primary
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-primary
+  namespace: default
+spec:
+  serviceName: "postgres-primary"
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+      role: primary
+      cluster: c1
+  template:
+    metadata:
+      labels:
+        app: postgres
+        role: primary
+        cluster: c1
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        # Mantidos argumentos customizados conforme solicitado
+        args:
+          - "postgres"
+          - "-c"
+          - "cluster.k8s_node=$(K8S_NODE_NAME)"
+          - "-c"
+          - "cluster.k8s_name=$(CLUSTER_NAME)"
+        env:
+        - name: POSTGRES_USER
+          value: "postgres"
+        - name: POSTGRES_PASSWORD
+          value: "postgres123"
+        - name: PGDATA
+          value: "/var/lib/postgresql/data/pgdata"
+        - name: K8S_NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: CLUSTER_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: global-config
+              key: cluster-name
+        ports:
+        - containerPort: 5432
+        volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+        - name: init-script
+          mountPath: /docker-entrypoint-initdb.d
+      volumes:
+      - name: init-script
+        configMap:
+          name: master-config
+          defaultMode: 0755
+  volumeClaimTemplates:
+  - metadata:
+      name: postgres-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 10Gi

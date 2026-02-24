@@ -1,0 +1,128 @@
+# ==========================================================
+# SISTEMA DE FAILOVER AUTOMÁTICO (Somente C2)
+# ==========================================================
+
+# 1. Service Entrypoint (O Backend conecta AQUI)
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-db-entrypoint
+  namespace: default
+  annotations:
+    # CORREÇÃO CRÍTICA: Permite buscar endpoints no Cluster 01
+    service.cilium.io/global: "true"
+spec:
+  ports:
+  - port: 5432
+    targetPort: 5432
+    name: postgres
+  selector:
+    # Estado inicial
+    app: postgres
+    role: primary
+
+---
+# 2. ServiceAccount para o Robô
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: failover-bot
+  namespace: default
+
+---
+# 3. Permissão para Alterar Serviços
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: service-patcher
+  namespace: default
+rules:
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["get", "list", "patch", "update"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: failover-bot-binding
+  namespace: default
+subjects:
+- kind: ServiceAccount
+  name: failover-bot
+  namespace: default
+roleRef:
+  kind: Role
+  name: service-patcher
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# 4. O Robô de Monitoramento (Watcher v2 - Com Anti-Flapping)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: failover-watcher
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: failover-watcher
+  template:
+    metadata:
+      labels:
+        app: failover-watcher
+    spec:
+      serviceAccountName: failover-bot
+      containers:
+      - name: watcher
+        image: bitnami/kubectl:latest
+        command:
+        - /bin/bash
+        - -c
+        - |
+          echo "🤖 Iniciando Monitor de Failover (v2 - Robusto)..."
+          
+          MASTER_HOST="postgres-global-master.default.svc.cluster.local"
+          SERVICE_NAME="backend-db-entrypoint"
+          NAMESPACE="default"
+          
+          # Variáveis de Controle
+          FAIL_COUNT=0
+          MAX_RETRIES=3  # Precisa falhar 3x (aprox 15s) para ativar failover
+          
+          while true; do
+            # Teste de conexão TCP (timeout curto)
+            if timeout 3s bash -c "</dev/tcp/$MASTER_HOST/5432" 2>/dev/null; then
+              STATUS="ONLINE"
+              FAIL_COUNT=0 # Reseta contagem se tiver sucesso
+            else
+              STATUS="OFFLINE"
+              FAIL_COUNT=$((FAIL_COUNT+1))
+              echo "⚠️  Alerta: Falha na conexão com Master ($FAIL_COUNT/$MAX_RETRIES)"
+            fi
+            
+            # Pega configuração atual do serviço
+            CURRENT_ROLE=$(kubectl get svc $SERVICE_NAME -n $NAMESPACE -o jsonpath='{.spec.selector.role}')
+            
+            # LÓGICA DE DECISÃO
+            if [ "$STATUS" == "ONLINE" ]; then
+                # Se Master está online e o serviço está apontando para réplica (Modo Failover)
+                if [ "$CURRENT_ROLE" != "primary" ]; then
+                    echo "🟢 Master Estável! Revertendo para Escrita (Primary)..."
+                    kubectl patch svc $SERVICE_NAME -n $NAMESPACE -p '{"spec":{"selector":{"role":"primary"}}}'
+                fi
+            
+            else
+                # Se Master está OFFLINE
+                if [ $FAIL_COUNT -ge $MAX_RETRIES ]; then
+                    # Só muda se já não estiver em modo réplica
+                    if [ "$CURRENT_ROLE" != "replica-remote" ]; then
+                        echo "🔴 Master CONFIRMADO OFFLINE ($FAIL_COUNT falhas)! Ativando Failover..."
+                        kubectl patch svc $SERVICE_NAME -n $NAMESPACE -p '{"spec":{"selector":{"role":"replica-remote"}}}'
+                    fi
+                fi
+            fi
+            
+            sleep 5
+          done
